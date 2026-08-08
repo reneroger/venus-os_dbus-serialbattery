@@ -12,7 +12,14 @@
 
 # avoid importing wildcards, remove unused imports
 from battery import Battery, Cell
-from utils import SOC_CALCULATION, open_serial_port, get_connection_error_message, logger, capture_raw_data
+from utils import (
+    MAX_BATTERY_DISCHARGE_CURRENT,
+    SOC_CALCULATION,
+    open_serial_port,
+    get_connection_error_message,
+    logger,
+    capture_raw_data,
+)
 from time import sleep
 from struct import unpack
 from re import findall
@@ -585,8 +592,17 @@ class KS48100(Battery):
                     self.max_battery_charge_current = CHG_C_limit
                 else:
                     self.max_battery_charge_current = 0
+
+                # The frame has no discharge current field at all: both current
+                # fields it does carry (upper_limit_of_CHG_C and CHG_C_limit)
+                # describe charging, and on the packs seen so far they hold the
+                # same value. Deriving a discharge limit from a charge limit
+                # states something the BMS never said, and it silently caps
+                # discharge at the charge rate. Leave that limit to
+                # MAX_BATTERY_DISCHARGE_CURRENT and only force it to zero when
+                # the BMS has opened the discharge FET.
                 if self.discharge_fet is True:
-                    self.max_battery_discharge_current = CHG_C_limit
+                    self.max_battery_discharge_current = MAX_BATTERY_DISCHARGE_CURRENT
                 else:
                     self.max_battery_discharge_current = 0
 
