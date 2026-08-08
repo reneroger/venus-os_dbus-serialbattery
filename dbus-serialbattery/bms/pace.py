@@ -5,7 +5,24 @@
 
 from battery import Battery, Cell
 from utils import SOC_CALCULATION, read_serial_data, logger
+from time import sleep
 import sys
+
+
+# Protocol versions that appear in the frame header. 25 is paceic, 20 is what
+# the BMS display calls PYLON_485. Both use the same framing, so the driver can
+# simply try them in turn.
+PROTOCOL_VERSIONS = (b"25", b"20")
+
+# Pack selector in the INFO field of the analog value request. 0xFF asks for all
+# packs, which some firmwares answer with an empty data set -- those need the
+# pack number instead.
+PACK_INFO_ALL = b"FF"
+
+# Settling time between the two reads in read_frame(). The header read leaves the
+# rest of the frame in flight; querying again immediately gets no answer at all.
+# 0.1 s was enough on the test hardware, 0.2 s leaves room.
+FRAME_PROBE_PAUSE = 0.2
 
 
 class Pace(Battery):
@@ -18,21 +35,33 @@ class Pace(Battery):
         self.poll_interval = 5000
         self.cell_voltage_lp = 0.9
 
+        # Both are settled once in detect_protocol() and then left alone.
+        self.protocol_version = PROTOCOL_VERSIONS[0]
+        self.pack_info = PACK_INFO_ALL
+
+        # Reply length per command, learned from the first answer. See read_frame().
+        self.frame_lengths = {}
+
     BATTERYTYPE = "PACE RS232"
     LENGTH_CHECK = 0  # ignored
     LENGTH_POS = 2  # ignored
     LENGTH_SIZE = "H"  # ignored
 
+    @property
+    def address_ascii(self) -> bytes:
+        """The BMS address as two ASCII hex digits, as the frame carries it."""
+        if isinstance(self.address, bytes):
+            value = self.address[0] if len(self.address) > 0 else 0
+        else:
+            value = int(self.address)
+        return f"{value:02X}".encode("ascii")
+
     def _build_command(self, cmd_part: bytes) -> bytes:
         # 1. Basis-Header (SOI + Version)
-        soi_and_version = b"\x7e" + b"25"
+        soi_and_version = b"\x7e" + self.protocol_version
 
         # 2. Adresse  b'\x01' -> b'01')
-        if isinstance(self.address, bytes):
-            addr_val = self.address[0] if len(self.address) > 0 else 0
-        else:
-            addr_val = int(self.address)
-        addr_ascii = f"{addr_val:02X}".encode("ascii")
+        addr_ascii = self.address_ascii
 
         # 3. connect
         cmd_without_crc = soi_and_version + addr_ascii + cmd_part
@@ -50,7 +79,7 @@ class Pace(Battery):
 
     @property
     def command_status(self):
-        return self._build_command(b"4642E002FF")
+        return self._build_command(b"4642E002" + self.pack_info)
 
     @property
     def command_software_version(self):
@@ -64,11 +93,130 @@ class Pace(Battery):
     def command_fuses(self):
         return self._build_command(b"4644E00201")
 
+    def read_frame(self, command: bytes):
+        """
+        Read a reply whose length is only known from the reply itself.
+
+        read_serial_data() has to be told upfront how many bytes to wait for, but
+        the length of a paceic reply depends on how many cells and temperature
+        sensors the pack reports -- a 16S pack with 5 sensors answers with 132
+        bytes, one with 6 sensors with 136. Asking for the wrong number makes the
+        read time out.
+
+        So the header is fetched first, which carries the payload length, and the
+        result is remembered per command. Only the first read of each command
+        costs an extra round trip.
+
+        :param command: the complete frame to send
+        :return: the reply, or False on failure
+        """
+        length = self.frame_lengths.get(command)
+
+        if length is None:
+            # 13 bytes cover SOI, version, address, CID1, CID2 and the length field.
+            header = read_serial_data(
+                command,
+                self.port,
+                self.baud_rate,
+                self.LENGTH_POS,
+                self.LENGTH_CHECK,
+                13,
+                self.LENGTH_SIZE,
+                battery_online=self.online,
+            )
+            if not header or len(header) < 13 or header[0] != 0x7E:
+                return False
+
+            try:
+                # LENID holds the payload length, plus 13 header and 5 trailing bytes.
+                # One less than that is requested on purpose: read_serialport_data()
+                # loops `while len(data) <= length`, so asking for the exact size
+                # never satisfies the condition and runs into the timeout. Both
+                # implementations read in chunks, so the full frame arrives anyway.
+                # This is the reason for the "should be 58 ... so we use 57" note
+                # on the fixed lengths this method replaces.
+                length = 13 + int(header[10:13], 16) + 5 - 1
+            except ValueError:
+                logger.debug("PACE: could not read the payload length from the header")
+                return False
+
+            self.frame_lengths[command] = length
+            logger.debug(f"PACE: reply length for this command is {length + 1} bytes")
+
+            # Let the rest of the header reply drain before asking again.
+            sleep(FRAME_PROBE_PAUSE)
+
+        data = self.read_serial_data_pace(command, length)
+        if data is False:
+            # A pack that changed its cell or sensor count invalidates the length.
+            self.frame_lengths.pop(command, None)
+        return data
+
+    @staticmethod
+    def status_offsets(status_data) -> tuple:
+        """
+        Work out where the fields behind the variable-length blocks start.
+
+        The analog value reply carries the cell voltages and then the temperature
+        readings, both prefixed by their count. Everything after that -- current,
+        voltage, capacities, cycles -- therefore sits at an offset that depends on
+        how many cells and sensors the pack has. Packs with 5 and with 6
+        temperature sensors are both in the field.
+
+        :param status_data: the raw reply
+        :return: cell count, temperature count, offset of the current field
+        """
+        cell_count = int(status_data[17:19], 16)
+        temperature_count_offset = 19 + cell_count * 4
+        temperature_count = int(status_data[temperature_count_offset : temperature_count_offset + 2], 16)
+        current_offset = temperature_count_offset + 2 + temperature_count * 4
+        return cell_count, temperature_count, current_offset
+
+    def detect_protocol(self) -> bool:
+        """
+        Find the protocol version and pack selector this BMS answers to.
+
+        Tries every combination until one returns an answer that actually
+        contains cell voltages. A pack that only supports one of them replies to
+        the others either not at all or with an empty data set.
+
+        :return: True if a working combination was found, False otherwise
+        """
+        for version in PROTOCOL_VERSIONS:
+            for pack_info in (PACK_INFO_ALL, self.address_ascii):
+                self.protocol_version = version
+                self.pack_info = pack_info
+
+                status_data = self.read_frame(self.command_status)
+                if status_data is False:
+                    continue
+
+                try:
+                    cell_count, _, _ = self.status_offsets(status_data)
+                    # An empty data set reports its cells as 0 mV.
+                    first_cell = int(status_data[19:23], 16)
+                except (ValueError, IndexError):
+                    continue
+
+                if cell_count > 0 and first_cell > 0:
+                    logger.info(f"PACE: protocol v{version.decode()}, pack info {pack_info.decode()}, {cell_count} cells")
+                    return True
+
+                logger.debug(f"PACE: v{version.decode()} with pack info {pack_info.decode()} answered without measurements")
+
+        # Leave the defaults in place so the log shows what was tried last.
+        self.protocol_version = PROTOCOL_VERSIONS[0]
+        self.pack_info = PACK_INFO_ALL
+        return False
+
     def test_connection(self):
         # call a function that will connect to the battery, send a command and retrieve the result.
         # The result or call should be unique to this BMS. Battery name or version, etc.
         # Return True if success, False for failure
         try:
+            if not self.detect_protocol():
+                return False
+
             result = self.get_settings()
             result = result and self.read_status_data()
         except Exception:
@@ -89,27 +237,29 @@ class Pace(Battery):
         # Set the current limits, populate cell count, etc
         # Return True if success, False for failure
         logger.debug("requesting settings")
-        status_data = self.read_serial_data_pace(self.command_status, 160)
+        status_data = self.read_frame(self.command_status)
         # check if connection success
         if status_data is False:
             return False
 
-        self.cell_count = int(status_data[17:19], 16)
+        self.cell_count, _, current_offset = self.status_offsets(status_data)
         for i in range(0, self.cell_count):
             self.cells.append(Cell(False))
 
         # cycles
-        self.cycles = int(status_data[127:131], 16)
+        self.cycles = int(status_data[current_offset + 18 : current_offset + 22], 16)
 
         # capacity
-        self.capacity_remain = int(status_data[117:121], 16) / 100
+        self.capacity_remain = int(status_data[current_offset + 8 : current_offset + 12], 16) / 100
 
         # ######################### SOFTWARE VERSION #############################
         logger.debug("requesting software version")
         # 13 + 5 + 40, should be 58, but doesn't ever trigger, so we use 57, that works fine
-        status_data = self.read_serial_data_pace(self.command_software_version, 57)
-        if status_data is False:
-            return True
+        status_data = self.read_frame(self.command_software_version)
+        # Some firmwares answer this with an empty frame, which is short. Reading
+        # 20 fields out of it would run past the end.
+        if status_data is False or len(status_data) < 13 + 40:
+            logger.debug("PACE: no software version reported")
         else:
             h = ""
             for i in range(20):  # 20 byte
@@ -120,9 +270,9 @@ class Pace(Battery):
         # ######################### SERIAL NR #############################
         logger.debug("requesting serial nr")
         # 13 + 5 + 40, should be 58, but doesn't ever trigger, so we use 57, that works fine
-        status_data = self.read_serial_data_pace(self.command_serial_nr, 97)
-        if status_data is False:
-            return True
+        status_data = self.read_frame(self.command_serial_nr)
+        if status_data is False or len(status_data) < 13 + 40:
+            logger.debug("PACE: no serial number reported")
         else:
             h = ""
             for i in range(20):  # 20 byte
@@ -153,7 +303,7 @@ class Pace(Battery):
     def read_fuses_data(self):
         logger.debug("run read_fuses_data()")
         # same here, should be 96 but we have to request 95 .. have to check why
-        status_data = self.read_serial_data_pace(self.command_fuses, 95)
+        status_data = self.read_frame(self.command_fuses)
         if status_data is False:
             return False
         # ## reset all warnings ###
@@ -359,7 +509,7 @@ class Pace(Battery):
 
     def read_status_data(self):
         logger.debug("run read_status_data()")
-        status_data = self.read_serial_data_pace(self.command_status, 160)
+        status_data = self.read_frame(self.command_status)
         # check if connection success
         if status_data is False:
             return False
@@ -368,7 +518,7 @@ class Pace(Battery):
         #        be = ''.join(format(x, ' 02X') for x in status_data)
         #        logger.error(be)
 
-        self.cell_count = int(status_data[17:19], 16)
+        self.cell_count, temperature_sensor_count, current_offset = self.status_offsets(status_data)
         logger.debug("Cellcount: " + str(self.cell_count))
 
         for i in range(0, self.cell_count):
@@ -382,10 +532,10 @@ class Pace(Battery):
                 logger.debug("low passing " + str(n_v) + " to " + str(self.cells[i].voltage))
             logger.debug("Cell Voltage [" + str(i) + "]: " + str(self.cells[i].voltage))
 
-        temperature_sensor_count = int(status_data[83:85], 16)
+        temperature_offset = 19 + self.cell_count * 4 + 2
         logger.debug("Temp sensor count: " + str(temperature_sensor_count))
         for i in range(0, temperature_sensor_count):
-            v = round((int(status_data[85 + i * 4 : 85 + i * 4 + 4], 16) / 10) - 273, 1)
+            v = round((int(status_data[temperature_offset + i * 4 : temperature_offset + i * 4 + 4], 16) / 10) - 273, 1)
             logger.debug("Temperature [" + str(i) + "]: " + str(v))
             if i < 4:  # 0,1,2,3 are internal temps
                 self.to_temperature(i + 1, v)
@@ -393,20 +543,20 @@ class Pace(Battery):
                 self.to_temperature(0, v)
 
         # Battery voltage
-        self.voltage = int(status_data[113:117], 16) / 1000
+        self.voltage = int(status_data[current_offset + 4 : current_offset + 8], 16) / 1000
 
         # Battery ampere
-        if status_data[109] & 0b1000000:
-            self.current = (int(status_data[109:113], 16) - 65535) / 100
+        if status_data[current_offset] & 0b1000000:
+            self.current = (int(status_data[current_offset : current_offset + 4], 16) - 65535) / 100
         else:
-            self.current = int(status_data[109:113], 16) / 100
+            self.current = int(status_data[current_offset : current_offset + 4], 16) / 100
 
         # cycles
-        self.cycles = int(status_data[127:131], 16)
+        self.cycles = int(status_data[current_offset + 18 : current_offset + 22], 16)
 
         # capacity
-        self.capacity_remain = int(status_data[117:121], 16) / 100
-        self.capacity = int(status_data[123:127], 16) / 100
+        self.capacity_remain = int(status_data[current_offset + 8 : current_offset + 12], 16) / 100
+        self.capacity = int(status_data[current_offset + 14 : current_offset + 18], 16) / 100
         logger.debug("Capacity: " + str(self.capacity))
         logger.debug("Remaing capacity: " + str(self.capacity_remain))
 
@@ -468,11 +618,13 @@ class Pace(Battery):
             battery_online=self.online,
         )
 
-        logger.debug("received:")
-        logger.debug(data.hex(" "))
-
+        # Check for the failure case before logging: read_serial_data() returns
+        # False on timeout, and False has no .hex().
         if data is False:
             return False
+
+        logger.debug("received:")
+        logger.debug(data.hex(" "))
 
         if data[0] == 0x7E:
             logger.debug("SOI found")
