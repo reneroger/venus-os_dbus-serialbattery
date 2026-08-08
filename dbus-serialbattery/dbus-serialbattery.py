@@ -50,6 +50,7 @@ from bms.ks48100 import KS48100
 from bms.lltjbd import LltJbd
 from bms.lltjbd_up16s import LltJbd_Up16s
 from bms.pace import Pace
+from bms.pace_modbus import Pace_Modbus
 from bms.renogy import Renogy
 from bms.seplos import Seplos
 from bms.seplosv3 import Seplosv3
@@ -83,6 +84,7 @@ supported_bms_types = [
     {"bms": HLPdataBMS4S, "baud": 9600},
     {"bms": KS48100, "baud": 9600, "address": b"\x01"},
     {"bms": Pace, "baud": 9600, "address": b"\x00"},
+    {"bms": Pace_Modbus, "baud": 9600, "address": b"\x01"},
     {"bms": Renogy, "baud": 9600, "address": b"\x30"},
     {"bms": Renogy, "baud": 9600, "address": b"\xf7"},
     {"bms": Seplos, "baud": 19200, "address": b"\x00"},

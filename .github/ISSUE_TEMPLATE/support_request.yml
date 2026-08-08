@@ -152,6 +152,7 @@ body:
         - LiTime
         - MNB spi BMS
         - Pace BMS
+        - Pace BMS Modbus (RS485)
         - Renogy BMS
         - RV-C House battery
         - Seplos

@@ -40,6 +40,7 @@
 * Added: JKBMS PB - Performance and stability improvements with https://github.com/mr-manuel/venus-os_dbus-serialbattery/pull/428 by @hsteinhaus
 * Added: KS48100 BMS - Read SoH with https://github.com/mr-manuel/venus-os_dbus-serialbattery/pull/344 by @kopierschnitte
 * Added: LLT/JBD BLE: Add BLE UUID auto-detection for JBD/DH04 variants with https://github.com/mr-manuel/venus-os_dbus-serialbattery/pull/441 by @alexsanzder
+* Added: Pace BMS Modbus (RS485) - New BMS driver `Pace_Modbus` for PACE BMS running the `PACE_MODBUS` protocol on RS485, as found in Eco-Worthy and other rebranded packs. Different protocol from the existing `Pace` driver, which speaks paceic over RS232; a pack set to `PACE_MODBUS` does not answer paceic frames at all. Supports addresses for daisy chaining by @reneroger
 * Added: Pace BMS: Supports now addresses with https://github.com/mr-manuel/venus-os_dbus-serialbattery/pull/477 by @KoljaWindeler
 * Added: Prevent GUI modification installations by setting `GUI_INSTALL_CUSTOMIZATIONS` to `False` by @mr-manuel
 * Added: Raw BMS data capture for troubleshooting - when `BMS_CAPTURE_RAW_DATA` is enabled, every raw request/response exchanged with the BMS plus the decoded values and timing (timestamp and time since the previous cycle) are written to a size-capped `capture/<port>.jsonl` file, making it possible to reconstruct/replay an issue (including timing issues) without needing physical access to the battery by @mr-manuel
