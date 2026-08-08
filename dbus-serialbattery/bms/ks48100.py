@@ -19,6 +19,16 @@ from re import findall
 import sys
 
 
+# Two protocol dialects are in the field. They differ in the start byte, in CID1
+# for the service commands, and in whether the realtime request carries the
+# address in its INFO field. Packs answer only to their own dialect and stay
+# silent on the other, so the driver tries both when connecting.
+PROTOCOL_VARIANTS = (
+    {"name": "SOI 0x3E / CID1 0x42", "soi": ">", "cid1": b"\x42", "realtime_info": False},
+    {"name": "SOI 0x7E / CID1 0x4A", "soi": "~", "cid1": b"\x4a", "realtime_info": True},
+)
+
+
 class KS48100(Battery):
     def __init__(self, port, baud, address):
         super(KS48100, self).__init__(port, baud, address)
@@ -30,7 +40,43 @@ class KS48100(Battery):
         self.serial_number = ""
         self.history.exclude_values_to_calculate = ["charge_cycles", "total_ah_drawn", "charged_energy", "discharged_energy"]
 
+        # Settled once by detect_variant() and then left alone.
+        self.apply_variant(PROTOCOL_VARIANTS[0])
+
     BATTERYTYPE = "KS48100"
+
+    def apply_variant(self, variant: dict) -> None:
+        """
+        Switch the command builder over to one of the protocol dialects.
+
+        :param variant: an entry of PROTOCOL_VARIANTS
+        :return: None
+        """
+        self.protocol_variant = variant
+        self.soi = variant["soi"]
+        self.cid1 = variant["cid1"]
+        self.realtime_info = variant["realtime_info"]
+
+    def detect_variant(self, ser) -> bool:
+        """
+        Find which protocol dialect this BMS speaks.
+
+        The manufacturer parameter request is used for the test because it is the
+        first thing get_settings() asks for anyway, and because it differs between
+        the dialects only in the start byte.
+
+        :param ser: the open serial port
+        :return: True if a dialect answered, False otherwise
+        """
+        for variant in PROTOCOL_VARIANTS:
+            self.apply_variant(variant)
+            if self.get_serial(ser):
+                logger.info(f"KS48100: protocol variant {variant['name']}")
+                return True
+            logger.debug(f"KS48100: no answer with {variant['name']}")
+
+        self.apply_variant(PROTOCOL_VARIANTS[0])
+        return False
 
     def test_connection(self):
         """
@@ -78,7 +124,7 @@ class KS48100(Battery):
             with open_serial_port(self.port, self.baud_rate) as ser:
                 if ser:
                     if ser.is_open:
-                        result = self.get_serial(ser)
+                        result = self.detect_variant(ser)
 
                         result = result and self.get_cells_params(ser)
 
@@ -141,7 +187,8 @@ class KS48100(Battery):
 
         return result
 
-    def probe(self, ser, cid1=b"\x42", cid2=b"\x47"):
+    def probe(self, ser, cid1=None, cid2=b"\x47"):
+        cid1 = self.cid1 if cid1 is None else cid1
         result = False
 
         # req = self.create_command(self.address, cid1, cid2, self.address.hex().upper())
@@ -619,7 +666,7 @@ class KS48100(Battery):
         Example command (mark the \r at the end):
         ~22014A47E00201FD23␍
         """
-        return self.create_command(self.address, b"\x42", b"\x47", self.address.hex().upper())
+        return self.create_command(self.address, self.cid1, b"\x47", self.address.hex().upper())
 
     def create_command_get_mfg_params(self):
         """
@@ -657,8 +704,9 @@ class KS48100(Battery):
         Example command (mark the \r at the end):
         ~22014A42E00201FD28␍
         """
-        # return self.create_command(self.address, b"\x4A", b"\x42", self.address.hex().upper())
-        return self.create_command(self.address, b"\x42", b"\x42")
+        if self.realtime_info:
+            return self.create_command(self.address, self.cid1, b"\x42", self.address.hex().upper())
+        return self.create_command(self.address, self.cid1, b"\x42")
 
     def create_command_get_manufacturer_info(self):
         """
@@ -666,11 +714,11 @@ class KS48100(Battery):
         Example command (mark the \r at the end):
         ~22014A510000FDA0␍
         """
-        return self.create_command(self.address, b"\x42", b"\x51")
+        return self.create_command(self.address, self.cid1, b"\x51")
 
     def create_command(self, addr, cid1, cid2, info=""):
         command = ""
-        command += ">"  # B1=SOI
+        command += self.soi  # B1=SOI
         command += "22"  # B2=Version
         command += addr.hex().upper()  # B3=ADDR
         command += cid1.hex().upper()  # B4=CID1
