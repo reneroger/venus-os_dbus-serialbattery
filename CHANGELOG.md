@@ -91,6 +91,7 @@
 * Changed: HLPDATA BMS - Fixed wrong charge/discharge fet assignment @mr-manuel
 * Changed: Improved BMS Cable Alarm Logic. Fixes https://github.com/mr-manuel/venus-os_dbus-serialbattery/issues/309 by @mr-manuel
 * Changed: JK Inverter BMS - Fixed serial number length by @mr-manuel
+* Changed: JKBMS BLE - Fix initialization handshake order to request settings before device info with https://github.com/mr-manuel/venus-os_dbus-serialbattery/pull/524 by @thatisfree
 * Changed: JKBMS BLE - Fixed negative temperature display. Fixes https://github.com/mr-manuel/venus-os_dbus-serialbattery/issues/369 by @mr-manuel
 * Changed: JKBMS CAN - Correct calculation of arbitration_id for device_address > 0. Fixes https://github.com/mr-manuel/venus-os_dbus-serialbattery/issues/288 with https://github.com/mr-manuel/venus-os_dbus-serialbattery/pull/306 by @Hooorny
 * Changed: JKBMS PB - Auto-recover the shared RS485 port when the driver gets stuck after a USB re-plug or a persistent dead-bus: after 8 consecutive failed reads the fd is closed and reopened on next access by @hsteinhaus
@@ -108,6 +109,7 @@
 * Changed: RV-C CAN BMS - Fixed wrong charge/discharge fet assignment @mr-manuel
 * Changed: Seplos BMS - Fix problems with unique identifier when daisy chained by @KoljaWindeler
 * Changed: Service runscripts now derive the serial port name from the service-directory suffix, so manually-created service entries (e.g. for socat-bridged PTYs) no longer depend on the `TTY` sentinel substitution by serial-starter. Fixes https://github.com/hsteinhaus/venus-os_dbus-serialbattery/issues/2 by @hsteinhaus
+* Changed: SoC calculation - Fix reset to 0% for the battery that gets empty last. The reset required a reported current below 0 A, but many BMS report small currents as 0 A and the discharge current limit reaches 0 A at `MIN_CELL_VOLTAGE`. It now only requires the lowest cell voltage to stay at or below `MIN_CELL_VOLTAGE` for 60 seconds, and the timer restarts when the cell voltage recovers. Fixes https://github.com/mr-manuel/venus-os_dbus-serialbattery/issues/491 by @reneroger
 * Changed: Startup BMS recognition sequence changed to startup faster for most used BMS by @mr-manuel
 * Changed: Temperature compensation - Preserve missing temperature sensor values instead of crashing when applying adjustment settings. Fixes https://github.com/mr-manuel/venus-os_dbus-serialbattery/issues/457 by @akmhatey-ai
 * Changed: UBMS CAN code style to snake_case, various improvements and fixes by @gimx

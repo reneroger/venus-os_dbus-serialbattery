@@ -629,16 +629,21 @@ class Battery(ABC):
             # execute checks only if one cell reaches min voltage
             # use lowest cell voltage, since in this case the battery is empty
             # else a unbalanced battery won't reach 0% and the BMS will shut down
-            if self.get_min_cell_voltage() <= utils.MIN_CELL_VOLTAGE:
-                # check if battery is still being discharged
-                if self.current_calc < 0 and self.soc_calc_reset_start_time:
-                    # set soc to 0%, if SOC_RESET_TIME is reached and soc_calc is not rounded 0%
-                    if (int(current_time) - self.soc_calc_reset_start_time) > SOC_RESET_TIME and round(self.soc_calc, 0) != 0:
-                        logger.info("SOC set to 0%")
-                        self.soc_calc_capacity_remain = 0
-                        self.soc_calc_reset_start_time = None
-                else:
+            # the current is not checked: at rest the cell voltage is the most reliable sign of an empty battery,
+            # while many BMS report small currents (e.g. below 0.5 A) as 0 A and the discharge current limit
+            # reaches 0 A exactly at MIN_CELL_VOLTAGE
+            min_cell_voltage = self.get_min_cell_voltage()
+            if min_cell_voltage is not None and min_cell_voltage <= utils.MIN_CELL_VOLTAGE:
+                if self.soc_calc_reset_start_time is None:
                     self.soc_calc_reset_start_time = int(current_time)
+                # set soc to 0%, if SOC_RESET_TIME is reached and soc_calc is not rounded 0%
+                elif (int(current_time) - self.soc_calc_reset_start_time) > SOC_RESET_TIME and round(self.soc_calc, 0) != 0:
+                    logger.info("SOC set to 0%")
+                    self.soc_calc_capacity_remain = 0
+                    self.soc_calc_reset_start_time = None
+            else:
+                # restart the timer, if the lowest cell recovers above MIN_CELL_VOLTAGE
+                self.soc_calc_reset_start_time = None
         else:
             # if soc_calc is not available initialize it from the BMS
             if self.soc_calc is None:
